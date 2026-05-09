@@ -7,14 +7,14 @@ description: 论文搜索与阅读 - 搜索arXiv/Semantic Scholar论文并筛选
 
 本 skill 提供两种核心能力：
 1. **搜索模式**：根据研究兴趣自动搜索 arXiv 和 Semantic Scholar，筛选、多维评分并排序论文
-2. **阅读模式**：给定 arXiv URL，下载 TeX 源码并深度阅读，生成分析报告
+2. **阅读模式**：深度阅读单篇论文，生成高质量 Obsidian 笔记（TeX 源码优先，PDF fallback）
 
 # 模式判断
 
 根据用户输入自动选择模式：
 
-- **用户提供了 arXiv URL**（如 `https://arxiv.org/abs/2601.07372`）→ 进入**阅读模式**
-- **用户未提供 URL**（如 "搜索最新的 LLM 论文"、"今天有什么好论文"）→ 进入**搜索模式**
+- **用户提供了论文标识**（arXiv URL、DOI、标题、本地 PDF 路径）→ 进入**阅读模式**
+- **用户未提供论文标识**（如 "搜索最新的 LLM 论文"、"今天有什么好论文"）→ 进入**搜索模式**
 - **用户提供了关键词**（如 "搜索 retrieval augmented generation"）→ 进入**搜索模式（Focus）**
 
 ---
@@ -997,6 +997,8 @@ python scripts/materialize_figure_asset.py \
 
 # 依赖项
 
+## 搜索模式依赖
+
 - **Python 3.x**（运行搜索和筛选脚本）
 - **PyYAML**（解析研究兴趣配置文件）
   ```bash
@@ -1007,3 +1009,32 @@ python scripts/materialize_figure_asset.py \
   pip install requests
   ```
 - **网络连接**（访问 arXiv API 和 Semantic Scholar API）
+
+## 阅读模式依赖
+
+- **Python >=3.10**（DeepPaperNote 脚本要求）
+- **PyMuPDF (fitz)**（PDF 处理，fallback 模式）
+  ```bash
+  pip install pymupdf
+  ```
+- **pypdf**（PDF 元数据提取）
+  ```bash
+  pip install pypdf
+  ```
+- **pdfplumber**（PDF 表格提取）
+  ```bash
+  pip install pdfplumber
+  ```
+- **Zotero**（可选，用于本地库集成和 PDF 附件定位）
+- **Zotero MCP 工具**（可选，用于 Zotero 集成）
+
+## 环境变量
+
+- **OBSIDIAN_VAULT_PATH**：Obsidian vault 路径（搜索和阅读模式共享）
+  ```bash
+  export OBSIDIAN_VAULT_PATH="/path/to/your/obsidian/vault"
+  ```
+
+## 配置文件
+
+- **研究兴趣配置**：`$OBSIDIAN_VAULT_PATH/99_System/Config/research_interests.yaml`（搜索模式使用）
