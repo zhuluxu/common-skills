@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-arXiv + Semantic Scholar 混合架构论文搜索脚本
+arXiv + Semantic Scholar + Hugging Face Papers 混合架构论文搜索脚本
 用于 start-my-day skill，搜索最近一个月和最近一年的极火、极热门、极优质论文
+并集成 Hugging Face Daily Papers 和语义搜索
 """
 
 import xml.etree.ElementTree as ET
@@ -46,6 +47,12 @@ ARXIV_NS = {
 
 SEMANTIC_SCHOLAR_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 SEMANTIC_SCHOLAR_FIELDS = "title,abstract,publicationDate,citationCount,influentialCitationCount,url,authors,authors.affiliations,externalIds"
+
+HF_API_BASE = "https://huggingface.co/api"
+
+# HF 相关评分加分
+HF_DAILY_PAPERS_BOOST = 0.5      # 出现在 HF Daily Papers 中加分
+HF_LINKED_RESOURCES_BOOST = 0.3  # 有关联 models/datasets/spaces 加分
 
 # 默认分类关键词映射（当配置中无用户自定义关键词时使用）
 ARXIV_CATEGORY_KEYWORDS = {
@@ -163,6 +170,163 @@ def calculate_date_windows(target_date: Optional[datetime] = None, days: int = 3
     window_1y_end = target_date - timedelta(days=days + 1)
 
     return window_recent_start, window_recent_end, window_1y_start, window_1y_end
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face Papers 搜索
+# ---------------------------------------------------------------------------
+
+def fetch_hf_daily_papers(date: str | None = None, limit: int = 20, sort: str = "trending") -> list[dict]:
+    """从 Hugging Face Daily Papers 获取热门论文。
+
+    Args:
+        date: RFC 3339 日期 (YYYY-MM-DD)，None 则使用今天
+        limit: 返回结果数 (1-100)
+        sort: 排序方式 "publishedAt" 或 "trending"
+
+    Returns:
+        论文元数据列表
+    """
+    params = f"?p=0&limit={min(limit, 100)}"
+    if date:
+        params += f"&date={date}"
+    params += f"&sort={sort}"
+
+    url = f"{HF_API_BASE}/daily_papers{params}"
+    logger.info("[HF] Fetching daily papers%s", f" for {date}" if date else "")
+
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status != 200:
+                logger.warning("[HF] Daily papers API returned status %d", resp.status)
+                return []
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("[HF] Daily papers fetch failed: %s", e)
+        return []
+
+    papers = []
+    for item in data:
+        paper = _normalize_hf_paper(item)
+        if paper:
+            papers.append(paper)
+    logger.info("[HF] Got %d daily papers", len(papers))
+    return papers
+
+
+def search_hf_papers(query: str, limit: int = 20) -> list[dict]:
+    """使用 Hugging Face Papers Search API 进行语义和全文搜索。
+
+    Args:
+        query: 搜索查询 (最长 250 字符)
+        limit: 返回结果数 (1-120)
+
+    Returns:
+        论文元数据列表
+    """
+    encoded_query = urllib.parse.quote(query, safe="")
+    url = f"{HF_API_BASE}/papers/search?q={encoded_query}&limit={min(limit, 120)}"
+    logger.info("[HF] Searching papers: %s", query)
+
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status != 200:
+                logger.warning("[HF] Papers search API returned status %d", resp.status)
+                return []
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("[HF] Papers search failed: %s", e)
+        return []
+
+    papers = []
+    for item in data:
+        paper = _normalize_hf_paper(item)
+        if paper:
+            papers.append(paper)
+    logger.info("[HF] Found %d papers from search", len(papers))
+    return papers
+
+
+def fetch_hf_paper_metadata(arxiv_id: str) -> dict | None:
+    """从 HF Papers API 获取单篇论文的详细元数据（含关联资源）。
+
+    Args:
+        arxiv_id: arXiv 论文 ID
+
+    Returns:
+        元数据字典，包含 linked_models/datasets/spaces/githubRepo/projectPage
+    """
+    url = f"{HF_API_BASE}/papers/{arxiv_id}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _normalize_hf_paper(item: dict) -> dict | None:
+    """将 HF API 返回的论文数据规范化为内部标准格式。
+
+    Args:
+        item: HF API 论文数据
+
+    Returns:
+        规范化后的论文字典，或 None（数据不完整时）
+    """
+    paper_item = item.get("paper", item)
+    arxiv_id = paper_item.get("id", "")
+    title = paper_item.get("title", "")
+
+    if not arxiv_id or not title:
+        return None
+
+    # 提取作者
+    authors = []
+    for author in paper_item.get("authors", []):
+        name = author.get("name", "") if isinstance(author, dict) else str(author)
+        if name:
+            authors.append(name)
+
+    # 提取摘要
+    summary = paper_item.get("summary", "") or item.get("summary", "")
+
+    # 提取发表日期
+    published = paper_item.get("publishedAt", "") or item.get("publishedAt", "")
+    if not published:
+        # HF daily_papers 使用 publishedAt 在 paper 对象中
+        published = paper_item.get("publishedAt", "")
+
+    # 提取 upvotes
+    upvotes = item.get("paper", {}).get("upvotes", 0) or item.get("upvotes", 0)
+
+    paper = {
+        "arxiv_id": arxiv_id,
+        "title": title,
+        "authors": authors,
+        "summary": summary,
+        "published": published,
+        "url": f"https://arxiv.org/abs/{arxiv_id}",
+        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+        "source": "huggingface",
+        "is_hot_paper": False,  # Will be set later during scoring
+        "hf_daily_paper": True,  # 来自 HF Daily Papers
+        "hf_upvotes": upvotes,
+    }
+
+    # 提取关联资源链接（如果 API 返回了）
+    github_repo = paper_item.get("githubRepo")
+    project_page = paper_item.get("projectPage")
+    if github_repo:
+        paper["hf_github_repo"] = github_repo
+    if project_page:
+        paper["hf_project_page"] = project_page
+
+    return paper
 
 
 def search_arxiv_by_date_range(
@@ -909,10 +1073,22 @@ def filter_and_score_papers(
         summary = paper.get('summary', '') if 'summary' in paper else paper.get('abstract', '')
         quality = calculate_quality_score(summary)
 
-        # 计算综合推荐评分
+        # HF Daily Papers 加分
+        hf_boost = 0.0
+        if paper.get('hf_daily_paper'):
+            hf_boost = HF_DAILY_PAPERS_BOOST
+
+        # HF 关联资源加分
+        hf_resources_boost = 0.0
+        if paper.get('hf_github_repo') or paper.get('hf_project_page'):
+            hf_resources_boost += HF_LINKED_RESOURCES_BOOST * 0.5
+        if paper.get('hf_has_linked_models') or paper.get('hf_has_linked_datasets') or paper.get('hf_has_linked_spaces'):
+            hf_resources_boost += HF_LINKED_RESOURCES_BOOST * 0.5
+
+        # 将 HF 加分加入推荐评分
         recommendation_score = calculate_recommendation_score(
             relevance, recency, popularity, quality, is_hot_paper_batch
-        )
+        ) + hf_boost + hf_resources_boost
 
         # 添加评分信息
         paper['scores'] = {
@@ -920,7 +1096,9 @@ def filter_and_score_papers(
             'recency': round(recency, 2),
             'popularity': round(popularity, 2),
             'quality': round(quality, 2),
-            'recommendation': recommendation_score
+            'recommendation': recommendation_score,
+            'hf_daily_boost': round(hf_boost, 2),
+            'hf_resources_boost': round(hf_resources_boost, 2),
         }
         paper['matched_domain'] = matched_domain
         paper['matched_keywords'] = matched_keywords
@@ -938,7 +1116,8 @@ def main():
     """主函数"""
     import argparse
 
-    default_config = os.environ.get('OBSIDIAN_VAULT_PATH', '')
+    default_vault = os.path.expanduser('~/paper-load/paper-obsidian-repository/paper-reader')
+    default_config = os.environ.get('OBSIDIAN_VAULT_PATH', '') or default_vault
     if default_config:
         default_config = os.path.join(default_config, '99_System', 'Config', 'research_interests.yaml')
 
@@ -959,6 +1138,8 @@ def main():
                         help='Comma-separated list of arXiv categories')
     parser.add_argument('--skip-hot-papers', action='store_true',
                         help='Skip searching hot papers from Semantic Scholar')
+    parser.add_argument('--skip-hf-papers', action='store_true',
+                        help='Skip searching Hugging Face Daily Papers')
     parser.add_argument('--focus', type=str, default='',
                         help='User-specified focus keywords for today (comma-separated)')
     parser.add_argument('--days', type=int, default=30,
@@ -1121,6 +1302,52 @@ def main():
         else:
             logger.info("Skipping hot paper search (disabled by user)")
 
+    # ========== HF Daily Papers 搜索 ==========
+    hf_papers = []
+    if not args.skip_hf_papers:
+        logger.info("=" * 70)
+        logger.info("Step (HF): Searching Hugging Face Daily Papers")
+        logger.info("=" * 70)
+
+        try:
+            target_date_str = target_date.strftime('%Y-%m-%d') if target_date else None
+            hf_daily = fetch_hf_daily_papers(date=target_date_str, limit=20, sort="trending")
+            if hf_daily:
+                scored_hf = filter_and_score_papers(
+                    papers=hf_daily,
+                    config=config,
+                    target_date=target_date,
+                    is_hot_paper_batch=False,
+                )
+                logger.info("Scored %d HF Daily Papers", len(scored_hf))
+                hf_papers.extend(scored_hf)
+                all_scored_papers.extend(scored_hf)
+            else:
+                logger.info("No HF Daily Papers found")
+        except Exception as e:
+            logger.warning("HF Daily Papers search failed (non-fatal): %s", e)
+
+        # Focus 模式下也搜索 HF Papers Search API
+        if focus_keywords:
+            try:
+                focus_query = " ".join(focus_keywords)
+                hf_search = search_hf_papers(query=focus_query, limit=20)
+                if hf_search:
+                    scored_hf_search = filter_and_score_papers(
+                        papers=hf_search,
+                        config=config,
+                        target_date=target_date,
+                        is_hot_paper_batch=False,
+                        focus_keywords=focus_keywords,
+                    )
+                    logger.info("Scored %d HF search results for focus", len(scored_hf_search))
+                    hf_papers.extend(scored_hf_search)
+                    all_scored_papers.extend(scored_hf_search)
+            except Exception as e:
+                logger.warning("HF Papers search failed (non-fatal): %s", e)
+    else:
+        logger.info("Skipping HF Papers search (disabled by user)")
+
     # ========== 第三步：合并结果并排序 ==========
     logger.info("=" * 70)
     logger.info("Step 3: Merging and ranking results")
@@ -1176,6 +1403,7 @@ def main():
         },
         'total_recent': len(recent_papers),
         'total_hot': len(hot_papers),
+        'total_hf': len(hf_papers),
         'total_unique': len(unique_papers),
         'top_papers': top_papers
     }
@@ -1195,7 +1423,8 @@ def main():
     logger.info("Top %d papers:", len(top_papers))
     for i, p in enumerate(top_papers, 1):
         hot_marker = " [HOT]" if p.get('is_hot_paper') else ""
-        logger.info("  %d. %s... (Score: %s)%s", i, p.get('title', 'N/A')[:60], p['scores']['recommendation'], hot_marker)
+        hf_marker = " [HF]" if p.get('hf_daily_paper') else ""
+        logger.info("  %d. %s... (Score: %s)%s%s", i, p.get('title', 'N/A')[:60], p['scores']['recommendation'], hot_marker, hf_marker)
 
     return 0
 

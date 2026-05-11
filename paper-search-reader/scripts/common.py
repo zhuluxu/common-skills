@@ -262,6 +262,53 @@ def extract_doi(text: str) -> str | None:
     return match.group(1).rstrip(").,;]")
 
 
+def parse_hf_paper_id(text: str) -> str | None:
+    """Extract arXiv paper ID from a Hugging Face paper page URL or raw ID.
+
+    Supports:
+      - https://huggingface.co/papers/2602.08025
+      - https://hf.co/papers/2602.08025
+      - https://huggingface.co/papers/2602.08025.md
+      - 2602.08025 (bare ID, delegated to extract_arxiv_id)
+    """
+    text = (text or "").strip()
+    # Only match URLs that contain huggingface.co/papers/ or hf.co/papers/
+    match = re.search(
+        r"(?:huggingface\.co|hf\.co)/papers/(\d{4}\.\d{4,5})(?:v\d+)?(?:\.md)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    # Don't fall back to extract_arxiv_id for non-HF strings
+    # (bare IDs and arXiv URLs should be handled by their own extractors)
+    return None
+
+
+HF_API_BASE = "https://huggingface.co/api"
+
+
+def fetch_hf_json(path: str, timeout: int = 15) -> dict | list | None:
+    """Fetch JSON from the Hugging Face API with error handling.
+
+    Args:
+        path: API path (e.g. "/papers/2602.08025" or "/daily_papers?p=0&limit=20")
+        timeout: Request timeout in seconds
+
+    Returns:
+        Parsed JSON response, or None on failure.
+    """
+    url = f"{HF_API_BASE}{path}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("HF API request failed for %s: %s", url, e)
+    return None
+
+
 def is_probable_url(text: str) -> bool:
     return bool(re.match(r"^https?://", (text or "").strip(), flags=re.IGNORECASE))
 
@@ -278,6 +325,8 @@ def infer_source_type(value: str) -> str:
     if path.exists() and path.is_file() and path.suffix.lower() == ".pdf":
         return "local_pdf"
     if is_probable_url(stripped):
+        if parse_hf_paper_id(stripped):
+            return "hf_paper_url"
         if extract_arxiv_id(stripped):
             return "arxiv_url"
         if extract_doi(stripped):
@@ -672,6 +721,58 @@ def choose_best_title_match(title: str, candidates: list[dict[str, Any]]) -> dic
     return best
 
 
+def _try_hf_fallback(arxiv_id: str, source_url: str = "") -> dict[str, Any] | None:
+    """Try Hugging Face Papers API as fallback when arXiv API fails.
+
+    Returns a paper record if HF has the paper, None otherwise.
+    """
+    hf_data = fetch_hf_json(f"/papers/{arxiv_id}")
+    if not hf_data:
+        return None
+
+    paper = {
+        "paper_id": f"arxiv:{arxiv_id}",
+        "arxiv_id": arxiv_id,
+        "title": hf_data.get("title", ""),
+        "source_type": "hf_paper_url",
+        "source_url": source_url or f"https://huggingface.co/papers/{arxiv_id}",
+        "url": f"https://arxiv.org/abs/{arxiv_id}",
+        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+        "status": "ok",
+        "metadata_sources": ["hf_paper_url"],
+    }
+
+    # Extract authors
+    authors = []
+    for author in hf_data.get("authors", []):
+        name = author.get("name", "") if isinstance(author, dict) else str(author)
+        if name:
+            authors.append(name)
+    if authors:
+        paper["authors"] = authors
+
+    # Extract summary
+    summary = hf_data.get("summary", "")
+    if summary:
+        paper["summary"] = summary
+
+    # Extract published date
+    published = hf_data.get("publishedAt", "")
+    if published:
+        paper["published"] = published
+
+    # Extract linked resources
+    github_repo = hf_data.get("githubRepo")
+    project_page = hf_data.get("projectPage")
+    if github_repo:
+        paper["hf_github_repo"] = github_repo
+    if project_page:
+        paper["hf_project_page"] = project_page
+
+    import sys; print(f"[common] HF API fallback succeeded for arxiv_id={arxiv_id}", file=sys.stderr)
+    return paper
+
+
 def resolve_reference(value: str) -> dict[str, Any]:
     source_type = infer_source_type(value)
     stripped = (value or "").strip()
@@ -701,6 +802,12 @@ def resolve_reference(value: str) -> dict[str, Any]:
             paper["paper_id"] = paper_id_for_record(paper)
             paper["status"] = "ok"
             return paper
+        # arXiv API failed (e.g. rate-limited) — try HF API fallback
+        arxiv_id = extract_arxiv_id(stripped)
+        if arxiv_id:
+            hf_paper = _try_hf_fallback(arxiv_id, source_url="")
+            if hf_paper:
+                return hf_paper
     if source_type == "arxiv_url":
         papers = safe_fetch_arxiv_entries(id_list=extract_arxiv_id(stripped) or "", max_results=1)
         if papers:
@@ -708,6 +815,27 @@ def resolve_reference(value: str) -> dict[str, Any]:
             paper["paper_id"] = paper_id_for_record(paper)
             paper["status"] = "ok"
             return paper
+        # arXiv API failed — try HF API fallback
+        arxiv_id = extract_arxiv_id(stripped)
+        if arxiv_id:
+            hf_paper = _try_hf_fallback(arxiv_id, source_url=stripped)
+            if hf_paper:
+                return hf_paper
+    if source_type == "hf_paper_url":
+        arxiv_id = parse_hf_paper_id(stripped)
+        if arxiv_id:
+            papers = safe_fetch_arxiv_entries(id_list=arxiv_id, max_results=1)
+            if papers:
+                paper = papers[0]
+                paper["source_type"] = "hf_paper_url"
+                paper["source_url"] = stripped
+                paper["paper_id"] = paper_id_for_record(paper)
+                paper["status"] = "ok"
+                return paper
+            # arXiv API failed — try HF API fallback
+            hf_paper = _try_hf_fallback(arxiv_id, source_url=stripped)
+            if hf_paper:
+                return hf_paper
     if source_type in {"doi", "doi_url"}:
         doi = extract_doi(stripped) or ""
         paper = fetch_crossref_by_doi(doi) or {"doi": doi, "source_url": f"https://doi.org/{doi}"}
@@ -829,11 +957,15 @@ def enrich_metadata(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def runtime_config() -> dict[str, Any]:
+    default_vault = str(Path.home() / "paper-load" / "paper-obsidian-repository" / "paper-reader")
+    vault = env_config_value(
+        "DEEPPAPERNOTE_OBSIDIAN_VAULT",
+        "READ_ARXIV_OBSIDIAN_VAULT",
+    )
+    if not vault:
+        vault = os.environ.get("OBSIDIAN_VAULT_PATH", "") or default_vault
     return {
-        "obsidian_vault": env_config_value(
-            "DEEPPAPERNOTE_OBSIDIAN_VAULT",
-            "READ_ARXIV_OBSIDIAN_VAULT",
-        ),
+        "obsidian_vault": vault,
         "papers_dir": env_config_value("DEEPPAPERNOTE_PAPERS_DIR", default="Research/Papers"),
         "output_dir": env_config_value("DEEPPAPERNOTE_OUTPUT_DIR", default="tmp/DeepPaperNote"),
         "workspace_output_dir": env_config_value(

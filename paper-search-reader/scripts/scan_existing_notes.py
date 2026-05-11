@@ -196,8 +196,8 @@ def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='Scan existing notes and build keyword index')
     parser.add_argument('--vault', type=str,
-                        default=os.environ.get('OBSIDIAN_VAULT_PATH', ''),
-                        help='Path to Obsidian vault (or set OBSIDIAN_VAULT_PATH env var)')
+                        default=os.environ.get('OBSIDIAN_VAULT_PATH', '') or str(Path.home() / 'paper-load' / 'paper-obsidian-repository' / 'paper-reader'),
+                        help='Path to Obsidian vault (default: ~/paper-load/paper-obsidian-repository/paper-reader)')
     parser.add_argument('--output', type=str, default='existing_notes_index.json',
                         help='Output JSON file path')
     parser.add_argument('--papers-dir', type=str,

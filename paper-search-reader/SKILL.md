@@ -1,21 +1,31 @@
 ---
 name: paper-search-reader
-description: 论文搜索与阅读 - 搜索arXiv/Semantic Scholar论文并筛选评分，或深度阅读单篇论文 / Paper search & read - search, filter, score papers from arXiv/Semantic Scholar, or deep-read a single paper
+description: 论文搜索与阅读 - 搜索arXiv/Semantic Scholar/Hugging Face Papers论文并筛选评分，或深度阅读单篇论文 / Paper search & read - search, filter, score papers from arXiv/Semantic Scholar/HuggingFace, or deep-read a single paper
 ---
 
 # 论文搜索与阅读 Skill
 
 本 skill 提供两种核心能力：
-1. **搜索模式**：根据研究兴趣自动搜索 arXiv 和 Semantic Scholar，筛选、多维评分并排序论文
-2. **阅读模式**：深度阅读单篇论文，生成高质量 Obsidian 笔记（TeX 源码优先，PDF fallback）
+1. **搜索模式**：根据研究兴趣自动搜索 arXiv、Semantic Scholar 和 Hugging Face Papers，筛选、多维评分并排序论文
+2. **阅读模式**：深度阅读单篇论文，生成高质量 Obsidian 笔记（TeX 源码优先，HF markdown 次之，PDF fallback）
 
 # 模式判断
 
 根据用户输入自动选择模式：
 
-- **用户提供了论文标识**（arXiv URL、DOI、标题、本地 PDF 路径）→ 进入**阅读模式**
+- **用户提供了论文标识**（arXiv URL、HF 论文 URL、DOI、标题、本地 PDF 路径）→ 进入**阅读模式**
 - **用户未提供论文标识**（如 "搜索最新的 LLM 论文"、"今天有什么好论文"）→ 进入**搜索模式**
 - **用户提供了关键词**（如 "搜索 retrieval augmented generation"）→ 进入**搜索模式（Focus）**
+
+**URL 识别规则**：
+| 输入格式 | 模式 | 论文 ID |
+|----------|------|---------|
+| `https://arxiv.org/abs/2602.08025` | 阅读 | `2602.08025` |
+| `https://arxiv.org/pdf/2602.08025` | 阅读 | `2602.08025` |
+| `https://huggingface.co/papers/2602.08025` | 阅读 | `2602.08025` |
+| `https://hf.co/papers/2602.08025` | 阅读 | `2602.08025` |
+| `https://huggingface.co/papers/2602.08025.md` | 阅读 | `2602.08025` |
+| `2602.08025` | 阅读 | `2602.08025` |
 
 ---
 
@@ -29,15 +39,15 @@ description: 论文搜索与阅读 - 搜索arXiv/Semantic Scholar论文并筛选
 
 1. **用户在对话中显式指定路径** → 直接使用
 2. **环境变量** `OBSIDIAN_VAULT_PATH` → 拼接 `$OBSIDIAN_VAULT_PATH/99_System/Config/research_interests.yaml`
-3. **均不可用** → 脚本使用内置默认配置（通用 AI/ML 领域）
+3. **均不可用** → 使用默认路径 `~/paper-load/paper-obsidian-repository/paper-reader`
 
 ```bash
-# 解析环境变量（Claude Code bash 不自动 source shell profile）
+DEFAULT_VAULT="$HOME/paper-load/paper-obsidian-repository/paper-reader"
 if [ -z "$OBSIDIAN_VAULT_PATH" ]; then
     [ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" 2>/dev/null || true
     [ -f "$HOME/.bash_profile" ] && source "$HOME/.bash_profile" 2>/dev/null || true
 fi
-
+OBSIDIAN_VAULT_PATH="${OBSIDIAN_VAULT_PATH:-$DEFAULT_VAULT}"
 CONFIG_PATH="$OBSIDIAN_VAULT_PATH/99_System/Config/research_interests.yaml"
 ```
 
@@ -91,6 +101,9 @@ excluded_keywords:
 
 # Semantic Scholar API Key（可选，提高请求限额）
 semantic_scholar_api_key: null
+
+# Hugging Face Papers 搜索开关（可选，默认开启）
+enable_hf_papers: true
 ```
 
 **字段说明**：
@@ -111,7 +124,7 @@ semantic_scholar_api_key: null
 
 ```bash
 cd "$SKILL_DIR"
-python scripts/search_arxiv.py \
+python -m scripts.search_arxiv \
   --config "$CONFIG_PATH" \
   --output arxiv_filtered.json \
   --max-results 200 \
@@ -122,7 +135,8 @@ python scripts/search_arxiv.py \
 搜索流程：
 1. **arXiv API 搜索**：搜索最近 30 天内指定分类的论文（最多 200 篇）
 2. **Semantic Scholar 热门论文检索**：搜索过去一年的高影响力论文（按 influentialCitationCount 排序）
-3. **合并、去重、评分、排序**：输出 top N 篇推荐论文
+3. **Hugging Face Daily Papers**：获取当日 HF 社区热门论文（trending 排序）
+4. **合并、去重、评分、排序**：输出 top N 篇推荐论文
 
 ### 2.2 Focus 模式（按关键词搜索）
 
@@ -130,7 +144,7 @@ python scripts/search_arxiv.py \
 
 ```bash
 cd "$SKILL_DIR"
-python scripts/search_arxiv.py \
+python -m scripts.search_arxiv \
   --config "$CONFIG_PATH" \
   --output arxiv_filtered.json \
   --max-results 200 \
@@ -143,6 +157,7 @@ Focus 模式下：
 - 相关性评分以 focus 关键词匹配为主导（标题匹配 +2.0，摘要匹配 +1.0）
 - 原有兴趣域匹配仅作为 0.3 权重的辅助加分
 - Semantic Scholar 也按 focus 关键词搜索
+- **HF Papers Search API** 也按 focus 关键词搜索（语义 + 全文混合搜索）
 
 ### 2.3 搜索参数说明
 
@@ -157,6 +172,7 @@ Focus 模式下：
 | `--focus` | Focus 关键词（逗号分隔） | 空（使用普通模式） |
 | `--days` | 最近搜索窗口天数 | 30 |
 | `--skip-hot-papers` | 跳过 Semantic Scholar 热门论文搜索 | 不跳过 |
+| `--skip-hf-papers` | 跳过 Hugging Face Papers 搜索 | 不跳过 |
 
 ## 步骤3：读取和展示结果
 
@@ -208,7 +224,31 @@ cat arxiv_filtered.json
 **向用户展示时**：
 - 按推荐评分从高到低排列
 - 每篇论文显示：标题、评分、匹配领域、arXiv 链接
+- HF Daily Papers 论文标记 [HF]
 - 如果用户想深入某篇论文，可以直接给出 URL 进入阅读模式
+
+## 步骤4：保存搜索结果
+
+将搜索结果保存为 Obsidian 笔记到 `$OBSIDIAN_VAULT_PATH/search_result/` 目录。
+
+- 文件名：`{YYYY-MM-DD}_{搜索关键词}.md`
+- 默认 vault 路径：`~/paper-load/paper-obsidian-repository/paper-reader`
+
+**笔记内容**：
+- frontmatter：搜索日期、关键词、结果统计
+- 评分体系说明
+- 每篇论文的详细信息：
+  - 标题 + 来源标记
+  - 评分表格（相关性、新近性、热门度、质量、HF 加分）
+  - 匹配领域和关键词
+  - 摘要（中文描述。Claude 将英文摘要翻译为中文概述）
+  - arXiv / PDF / HF 链接
+  - 发表日期
+  - HF 关联资源（GitHub、项目页、点赞数）
+
+```bash
+mkdir -p "$OBSIDIAN_VAULT_PATH/search_result"
+```
 
 ## 评分体系
 
@@ -266,13 +306,18 @@ cat arxiv_filtered.json
 - 量化结果（outperforms、improves by）：+0.8
 - 实验指标（benchmark、ablation）：+0.4
 
+#### 5. Hugging Face 加分
+
+- **HF Daily Papers 加分**（+0.5）：论文出现在 HF Daily Papers 中
+- **HF 关联资源加分**（+0.3）：论文在 HF 上有关联的 models/datasets/spaces/GitHub
+
 ---
 
 # 阅读模式
 
-当用户提供论文标识（arXiv URL、DOI、标题、本地 PDF 路径）时，进入深度阅读模式。
+当用户提供论文标识（arXiv URL、HF 论文 URL、DOI、标题、本地 PDF 路径）时，进入深度阅读模式。
 
-本模式采用 **TeX 源码优先策略**：优先获取并使用 TeX 源码进行深度分析，仅在 TeX 不可用时回退到 PDF。
+本模式采用 **TeX 源码优先策略**：优先获取并使用 TeX 源码进行深度分析，HF markdown 次之，仅在两者不可用时回退到 PDF。
 
 ## 环境检查
 
@@ -319,16 +364,18 @@ fi
 
 ### 步骤 1：解析论文身份
 
-将用户输入（URL、DOI、标题、arXiv ID、本地 PDF）解析为规范的论文身份。
+将用户输入（URL、DOI、标题、arXiv ID、HF 论文 URL、本地 PDF）解析为规范的论文身份。
+
+**支持输入格式**：arXiv URL、arXiv PDF URL、Hugging Face 论文页、HF 短链接、HF markdown URL、arXiv ID、DOI、标题关键词
 
 **Zotero 优先策略**：
-- 若 Zotero 可用，首先在本地库中搜索（按标题、DOI 或 arXiv ID）
-- 若找到，使用 Zotero 的元数据作为规范身份（避免标题歧义）
-- 若未找到，回退到网络 API（arXiv、Semantic Scholar、DOI）
+- 若 Zotero 可用，首先在本地库中搜索
+- 若未找到，回退到网络 API（arXiv、HF Papers API、Semantic Scholar、DOI）
+- arXiv API 限流时自动 fallback 到 HF Papers API
 
 **调用脚本**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/resolve_paper.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.resolve_paper \
   --input "<用户输入>" \
   --output /tmp/paper_resolved.json
 ```
@@ -342,14 +389,18 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/resolve_paper.py \
 
 ### 步骤 2：收集元数据
 
-从多个来源收集完整的论文元数据（作者、摘要、发表日期、引用数等）。
+从多个来源收集完整的论文元数据（作者、摘要、发表日期、引用数等），并增强 Hugging Face 关联资源信息。
 
 **调用脚本**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/collect_metadata.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.collect_metadata \
   --input /tmp/paper_resolved.json \
   --output /tmp/paper_metadata.json
 ```
+
+**HF 元数据增强**：若论文有 arXiv ID，自动从 HF Papers API 获取：
+- `hf_metadata`: GitHub 仓库、项目页面、社区点赞数
+- `hf_linked_resources`: 关联的 models/datasets/spaces
 
 **输出**：`/tmp/paper_metadata.json`，包含：
 - `authors`: 作者列表
@@ -357,18 +408,18 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/collect_metadata.py \
 - `published_date`: 发表日期
 - `citations`: 引用数（如有）
 - `venue`: 发表会议/期刊（如有）
+- `hf_metadata`: HF 元数据（如有）
+- `hf_linked_resources`: HF 关联资源（如有）
 
-### 步骤 3：获取 TeX 源码（优先）或 PDF（fallback）
+### 步骤 3：获取论文内容（TeX 优先 → HF markdown → PDF fallback）
+
+**内容获取优先级**：TeX 源码 → HF markdown 全文 → PDF
 
 **TeX 优先策略**：
 1. 若论文来自 arXiv，首先尝试获取 TeX 源码（`https://arxiv.org/src/{arxiv_id}`）
 2. 若 TeX 源码可用，下载并解压到 `/tmp/paper_tex/{arxiv_id}/`
-3. 若 TeX 源码不可用（约 20-30% 的 arXiv 论文），回退到 PDF
-
-**PDF fallback 触发条件**：
-- arXiv 不提供 TeX 源码（仅 PDF）
-- 论文来自非 arXiv 来源（会议、期刊、预印本）
-- TeX 源码下载失败
+3. 若 TeX 源码不可用，尝试 HF markdown 全文
+4. 若 HF markdown 也不可用，回退到 PDF
 
 **TeX 源码获取**：
 ```bash
@@ -383,13 +434,26 @@ curl -L "$TEX_URL" -o /tmp/paper_tex/$ARXIV_ID.tar.gz
 # 解压
 cd /tmp/paper_tex/$ARXIV_ID && tar -xzf ../$ARXIV_ID.tar.gz
 
-# 定位入口文件（main.tex、paper.tex 等）
-MAIN_TEX=$(find . -maxdepth 1 -name "*.tex" | head -1)
+# 检查是否成功
+if [ -f /tmp/paper_tex/$ARXIV_ID/main.tex ] || [ -f /tmp/paper_tex/$ARXIV_ID/paper.tex ]; then
+    echo "TeX source available"
+else
+    echo "TeX source not available, trying HF markdown..."
+fi
 ```
+
+**HF markdown 全文获取**（TeX 不可用时）：
+```bash
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.fetch_hf_markdown \
+  --arxiv-id "$ARXIV_ID" \
+  --save-dir /tmp/paper_md
+```
+
+脚本使用 Python urllib 获取 markdown（比 shell curl 网络兼容性更好）。成功时保存到 `/tmp/paper_md/{arxiv_id}.md`，失败时返回非零退出码，流水线继续 fallback 到 PDF。
 
 **PDF fallback**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/fetch_pdf.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.fetch_pdf \
   --input /tmp/paper_metadata.json \
   --output /tmp/paper_pdf.json
 ```
@@ -417,7 +481,7 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/fetch_pdf.py \
 
 **PDF 模式**（fallback）：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/extract_evidence.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.extract_evidence \
   --input /tmp/paper_pdf.json \
   --output /tmp/paper_evidence.json
 ```
@@ -440,7 +504,7 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/extract_evidence.py \
 
 **PDF 模式**（fallback）：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/extract_pdf_assets.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.extract_pdf_assets \
   --input /tmp/paper_pdf.json \
   --output /tmp/paper_assets.json
 ```
@@ -458,7 +522,7 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/extract_pdf_assets.py \
 
 **调用脚本**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/plan_figures.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.plan_figures \
   --evidence /tmp/paper_evidence.json \
   --assets /tmp/paper_assets.json \
   --output /tmp/figure_plan.json
@@ -481,7 +545,7 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/plan_figures.py \
 
 **调用脚本**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/build_synthesis_bundle.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.build_synthesis_bundle \
   --metadata /tmp/paper_metadata.json \
   --evidence /tmp/paper_evidence.json \
   --assets /tmp/paper_assets.json \
@@ -494,7 +558,7 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/build_synthesis_bundle.py \
 - `evidence`: 结构化证据
 - `assets`: 图片资源列表
 - `figure_plan`: 图表放置计划
-- `source_type`: "tex" 或 "pdf"（标识使用的源类型）
+- `source_type`: "tex"、"hf_markdown" 或 "pdf"（标识使用的源类型）
 
 ### 步骤 8：模型规划笔记（Claude）
 
@@ -529,7 +593,7 @@ year: 2024
 venue: "会议/期刊"
 arxiv_id: "2601.07372"
 tags: ["tag1", "tag2"]
-source_type: "tex"  # 或 "pdf"
+source_type: "tex"  # 或 "hf_markdown" 或 "pdf"
 ---
 
 # 论文标题
@@ -573,7 +637,7 @@ source_type: "tex"  # 或 "pdf"
 
 **调用脚本**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/lint_note.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.lint_note \
   --input /tmp/paper_note_draft.md \
   --output /tmp/lint_report.json
 ```
@@ -614,7 +678,7 @@ Claude 进行最终的语言润色和可读性审查。
 
 **调用脚本**：
 ```bash
-cd "$SKILL_DIR" && $PY_EXEC scripts/write_obsidian_note.py \
+cd "$SKILL_DIR" && $PY_EXEC -m scripts.write_obsidian_note \
   --input /tmp/paper_note_draft.md \
   --metadata /tmp/paper_metadata.json \
   --vault "$OBSIDIAN_VAULT_PATH" \
@@ -675,7 +739,7 @@ cd "$SKILL_DIR" && $PY_EXEC scripts/write_obsidian_note.py \
 
 **CLI 接口**：
 ```bash
-python scripts/search_arxiv.py \
+python -m scripts.search_arxiv \
   --config <配置文件路径> \
   --output <输出JSON路径> \
   --max-results <最大结果数> \
@@ -699,7 +763,7 @@ python scripts/search_arxiv.py \
 
 **CLI 接口**：
 ```bash
-python scripts/scan_existing_notes.py \
+python -m scripts.scan_existing_notes \
   --vault <Obsidian vault 路径> \
   --output <输出JSON路径> \
   --papers-dir <Papers相对路径>
@@ -717,7 +781,7 @@ python scripts/scan_existing_notes.py \
 
 **CLI 接口**：
 ```bash
-python scripts/link_keywords.py \
+python -m scripts.link_keywords \
   --index <关键词索引JSON> \
   --input <输入Markdown文件> \
   --output <输出Markdown文件>
@@ -762,7 +826,7 @@ python scripts/link_keywords.py \
 
 **CLI 接口**：
 ```bash
-python scripts/resolve_paper.py \
+python -m scripts.resolve_paper \
   --input "<用户输入>" \
   --output <输出JSON路径> \
   --paper-id <可选的自定义ID>
@@ -779,7 +843,7 @@ python scripts/resolve_paper.py \
 
 **CLI 接口**：
 ```bash
-python scripts/collect_metadata.py \
+python -m scripts.collect_metadata \
   --input <resolved论文JSON> \
   --output <输出JSON路径>
 ```
@@ -795,7 +859,7 @@ python scripts/collect_metadata.py \
 
 **CLI 接口**：
 ```bash
-python scripts/fetch_pdf.py \
+python -m scripts.fetch_pdf \
   --input <metadata论文JSON> \
   --output <输出JSON路径> \
   --download-dir <PDF下载目录>
@@ -815,7 +879,7 @@ python scripts/fetch_pdf.py \
 
 **CLI 接口**：
 ```bash
-python scripts/extract_evidence.py \
+python -m scripts.extract_evidence \
   --input <PDF论文JSON> \
   --output <输出JSON路径>
 ```
@@ -831,7 +895,7 @@ python scripts/extract_evidence.py \
 
 **CLI 接口**：
 ```bash
-python scripts/extract_pdf_assets.py \
+python -m scripts.extract_pdf_assets \
   --input <PDF论文JSON> \
   --output <输出JSON路径> \
   --assets-dir <图片保存目录>
@@ -849,7 +913,7 @@ python scripts/extract_pdf_assets.py \
 
 **CLI 接口**：
 ```bash
-python scripts/plan_figures.py \
+python -m scripts.plan_figures \
   --evidence <证据JSON> \
   --assets <图片资源JSON> \
   --output <输出JSON路径>
@@ -866,7 +930,7 @@ python scripts/plan_figures.py \
 
 **CLI 接口**：
 ```bash
-python scripts/build_synthesis_bundle.py \
+python -m scripts.build_synthesis_bundle \
   --metadata <元数据JSON> \
   --evidence <证据JSON> \
   --assets <图片资源JSON> \
@@ -889,7 +953,7 @@ python scripts/build_synthesis_bundle.py \
 
 **CLI 接口**：
 ```bash
-python scripts/lint_note.py \
+python -m scripts.lint_note \
   --input <笔记Markdown文件> \
   --output <lint报告JSON>
 ```
@@ -906,7 +970,7 @@ python scripts/lint_note.py \
 
 **CLI 接口**：
 ```bash
-python scripts/write_obsidian_note.py \
+python -m scripts.write_obsidian_note \
   --input <笔记Markdown文件> \
   --metadata <元数据JSON> \
   --vault <Obsidian vault路径> \
@@ -924,7 +988,7 @@ python scripts/write_obsidian_note.py \
 
 **CLI 接口**：
 ```bash
-python scripts/run_pipeline.py \
+python -m scripts.run_pipeline \
   --input "<用户输入>" \
   --vault <Obsidian vault路径> \
   --output <最终结果JSON>
@@ -940,7 +1004,7 @@ python scripts/run_pipeline.py \
 
 **CLI 接口**：
 ```bash
-python scripts/locate_zotero_attachment.py \
+python -m scripts.locate_zotero_attachment \
   --item-key <Zotero item key> \
   --output <输出JSON路径>
 ```
@@ -955,7 +1019,7 @@ python scripts/locate_zotero_attachment.py \
 
 **CLI 接口**：
 ```bash
-python scripts/create_input_record.py \
+python -m scripts.create_input_record \
   --input "<用户输入>" \
   --output <输出JSON路径>
 ```
@@ -972,7 +1036,7 @@ python scripts/create_input_record.py \
 
 **CLI 接口**：
 ```bash
-python scripts/check_environment.py \
+python -m scripts.check_environment \
   --vault <Obsidian vault路径> \
   --output <检查结果JSON>
 ```
@@ -988,9 +1052,27 @@ python scripts/check_environment.py \
 
 **CLI 接口**：
 ```bash
-python scripts/materialize_figure_asset.py \
+python -m scripts.materialize_figure_asset \
   --plan <图表规划JSON> \
   --output <输出JSON路径>
+```
+
+### fetch_hf_markdown.py
+
+位于 `scripts/fetch_hf_markdown.py`，HF markdown 全文获取。
+
+**功能**：
+- 使用 Python urllib 获取 Hugging Face 论文 markdown 全文
+- 网络兼容性优于 shell curl
+- 404 时优雅降级（论文未在 HF 索引）
+
+**CLI 接口**：
+```bash
+python -m scripts.fetch_hf_markdown \
+  --arxiv-id <arXiv论文ID> \
+  --save-dir <保存目录> \
+  --output <输出文件路径> \
+  --timeout <请求超时秒数>
 ```
 
 ---
@@ -1008,7 +1090,9 @@ python scripts/materialize_figure_asset.py \
   ```bash
   pip install requests
   ```
-- **网络连接**（访问 arXiv API 和 Semantic Scholar API）
+- **网络连接**（访问 arXiv API、Semantic Scholar API 和 Hugging Face API）
+
+**注意**：Hugging Face Papers API 使用 urllib（无需额外依赖），调用为非阻塞式——API 失败不阻塞搜索流程。
 
 ## 阅读模式依赖
 
@@ -1031,6 +1115,7 @@ python scripts/materialize_figure_asset.py \
 ## 环境变量
 
 - **OBSIDIAN_VAULT_PATH**：Obsidian vault 路径（搜索和阅读模式共享）
+  - 默认值：`~/paper-load/paper-obsidian-repository/paper-reader`
   ```bash
   export OBSIDIAN_VAULT_PATH="/path/to/your/obsidian/vault"
   ```
